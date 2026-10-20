@@ -1,0 +1,229 @@
+name: Build Kernel
+permissions:
+  contents: write
+  actions: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_devices:
+        description: 'target device (目标设备)'
+        required: true
+        type: choice
+        options:
+          - 'umi'
+          - 'cmi'
+          - 'cas'
+          - 'thyme'
+          - 'munch'
+          - 'dagu'
+          - 'elish'
+          - 'enuma'
+          - 'alioth'
+          - 'apollo'
+          - 'lmi'
+          - 'psyche'
+          - 'pipa'
+          - 'all'
+      compiled_system:
+        description: 'Applicable systems (适用系统)'
+        required: true
+        type: choice
+        default: 'MIUI'
+        options:
+          - 'MIUI'
+          - 'AOSP'
+      kernelsu_variant:
+        description: 'KernelSU variants (KernelSU 版本)'
+        required: true
+        type: choice
+        default: 'SukiSU-Ultra'
+        options:
+          - 'SukiSU-Ultra'
+          - 'RKSU'
+          - 'KernelSU'
+          - 'None'
+      kpm_enable:
+        description: 'Is KPM support enabled? (是否启用 KPM 支持?)'
+        required: true
+        type: choice
+        default: 'enable'
+        options:
+          - 'enable'
+          - 'disable'
+      kernel_version:
+        description: 'Customizing the kernel version number (自定义内核版本号)'
+        required: false
+        type: string
+        default: ''
+      build_type:
+        description: 'Kernel Build Type (内核构建类型)'
+        required: true
+        type: choice
+        default: 'Release'
+        options:
+          - 'Release'
+          - 'Dev'
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          DEVICES="${{ github.event.inputs.target_devices }}"
+          if [ "$DEVICES" == "all" ]; then
+            DEVICES="umi,cmi,cas,thyme,munch,dagu,elish,enuma,alioth,apollo,lmi,psyche,pipa"
+          fi
+          DEVICES_JSON="[$(echo $DEVICES | sed 's/,/","/g' | sed 's/.*/"&"')]"
+          echo "matrix={\"device\":$DEVICES_JSON}" >> $GITHUB_OUTPUT
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    strategy:
+      matrix: ${{fromJson(needs.prepare.outputs.matrix)}}
+      fail-fast: false
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+      WORKDIR: "${{ github.workspace }}"
+      KERNEL_SOURCE: "${{ github.workspace }}/kernel_source"
+      TOOLCHAIN_DIR: "${{ github.workspace }}/toolchain"
+      DEVICE: "${{ matrix.device }}"
+
+    steps:
+      - name: Build Information
+        run: |
+          echo "Device: ${DEVICE} | System: ${{ github.event.inputs.compiled_system }}"
+          echo "KernelSU: ${{ github.event.inputs.kernelsu_variant }} | KPM: ${{ github.event.inputs.kpm_enable }}"
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          swap-size-mb: 8192
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+
+      - name: Install dependencies
+        run: |
+          sudo apt update && sudo apt upgrade -y
+          sudo apt install -y bc binutils-dev bison build-essential ca-certificates ccache cmake curl file flex git libelf-dev libssl-dev make ninja-build python3-dev texinfo u-boot-tools xz-utils zlib1g-dev libncurses-dev wget zip cpio python3 python3-pip tree gcc clang lld llvm jq
+
+      - name: Configure ccache
+        run: |
+          mkdir -p ~/.cache
+          ccache --max-size=4G
+          ccache --set-config=compression=true
+          ccache --zero-stats
+          echo "CCACHE_DIR=$HOME/.cache" >> $GITHUB_ENV
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache
+          key: ccache-${{ github.event.inputs.compiled_system }}-${{ hashFiles('**/Makefile') }}
+          restore-keys: |
+            ccache-${{ github.event.inputs.compiled_system }}-
+            ccache-
+
+      - name: Clone kernel source
+        run: |
+          git clone https://github.com/yspbwx2010/kernel_xiaomi_sm8250_mod.git --depth=1 $KERNEL_SOURCE
+
+      - name: Cache toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TOOLCHAIN_DIR }}
+          key: toolchain-clang-r416183b-gcc-${{ hashFiles('**/*.sh') }}
+          restore-keys: |
+            toolchain-clang-r416183b-gcc-
+            toolchain-
+
+      - name: Download toolchain
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$TOOLCHAIN_DIR/clang" "$TOOLCHAIN_DIR/gcc/gcc64" "$TOOLCHAIN_DIR/gcc/gcc32"
+          cd "$TOOLCHAIN_DIR/clang"
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-r416183b.tar.gz -O clang.tar.gz
+          tar -xzf clang.tar.gz && rm clang.tar.gz
+          cd "$TOOLCHAIN_DIR/gcc/gcc64"
+          git init && git remote add origin https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git
+          git fetch --depth 1 origin && git checkout FETCH_HEAD
+          cd "$TOOLCHAIN_DIR/gcc/gcc32"
+          git init && git remote add origin https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git
+          git fetch --depth 1 origin && git checkout FETCH_HEAD
+
+      - name: Configure KernelSU
+        run: |
+          cd "$KERNEL_SOURCE"
+          KSU_VARIANT="${{ github.event.inputs.kernelsu_variant }}"
+          if [ "$KSU_VARIANT" == "SukiSU-Ultra" ]; then
+            curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/v4.0.0/kernel/setup.sh" | bash -s v4.0.0
+          elif [ "$KSU_VARIANT" == "RKSU" ]; then
+            curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/susfs-v1.5.5/kernel/setup.sh" | bash -s susfs-v1.5.5
+          elif [ "$KSU_VARIANT" == "KernelSU" ]; then
+            curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
+          fi
+
+      - name: Build kernel
+        run: |
+          cd "$KERNEL_SOURCE"
+          export PATH="$TOOLCHAIN_DIR/clang/bin:$PATH"
+          MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=$TOOLCHAIN_DIR/gcc/gcc64/bin/aarch64-linux-android- CROSS_COMPILE_COMPAT=$TOOLCHAIN_DIR/gcc/gcc32/bin/arm-linux-androideabi- CROSS_COMPILE_ARM32=$TOOLCHAIN_DIR/gcc/gcc32/bin/arm-linux-androideabi- CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld HOSTLD=ld.lld KCFLAGS=-Wno-error O=out"
+          SYSTEM="${{ github.event.inputs.compiled_system }}"
+          KSU="${{ github.event.inputs.kernelsu_variant }}"
+          KPM="${{ github.event.inputs.kpm_enable }}"
+          make $MAKE_ARGS -j$(nproc --all) ${DEVICE}_defconfig
+          scripts/config --file out/.config -e KALLSYMS -e KALLSYMS_ALL -e KPROBES -e HAVE_KPROBES -e KPROBE_EVENTS -e TMPFS_XATTR -e TMPFS_POSIX_ACL -e ZRAM -e ZSMALLOC -e SWAP -e ZSWAP
+          if [ "$SYSTEM" == "MIUI" ]; then
+            scripts/config --file out/.config --set-str STATIC_USERMODEHELPER_PATH /system/bin/micd -e OVERLAY_FS -d DEBUG_FS -e XIAOMI_MIUI -d LTO_CLANG -d LOCALVERSION_AUTO
+          fi
+          if [ "$KSU" == "SukiSU-Ultra" ] || [ "$KSU" == "RKSU" ]; then
+            scripts/config --file out/.config -e KSU -e KSU_SUSFS -e KSU_SUSFS_HAS_MAGIC_MOUNT -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_TRY_UMOUNT -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_ENABLE_LOG -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG -e KSU_SUSFS_OPEN_REDIRECT -d KSU_SUSFS_SUS_SU
+          elif [ "$KSU" == "KernelSU" ]; then
+            scripts/config --file out/.config -e KSU
+          fi
+          if [ "$KSU" == "SukiSU-Ultra" ] && [ "$KPM" == "enable" ]; then
+            scripts/config --file out/.config -e KPM
+          fi
+          sed -i "s/-dirty/-Yun/g" scripts/setlocalversion
+          make $MAKE_ARGS -j$(nproc --all) 2>&1 | tee build.log
+          test -f "$KERNEL_SOURCE/out/arch/arm64/boot/Image" || (tail -n 100 build.log && exit 1)
+
+      - name: KPM Patch
+        run: |
+          if [ "${{ github.event.inputs.kernelsu_variant }}" == "SukiSU-Ultra" ] && [ "${{ github.event.inputs.kpm_enable }}" == "enable" ]; then
+            cd "$KERNEL_SOURCE/out/arch/arm64/boot"
+            curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU_patch/refs/heads/main/kpm/patch_linux" -o patch
+            chmod 777 patch
+            ./patch && rm -f Image && mv oImage Image || true
+          fi
+
+      - name: Package AnyKernel3
+        run: |
+          mkdir -p "$WORKDIR/ak3_out"
+          cd "$WORKDIR/ak3_out"
+          git clone https://github.com/liyafe1997/AnyKernel3.git --depth=1
+          cd AnyKernel3
+          rm -rf .git .github README.md
+          cp "$KERNEL_SOURCE/out/arch/arm64/boot/Image" ./
+          zip -r "${DEVICE}_SukiSU.zip" .
+          mv "${DEVICE}_SukiSU.zip" ..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel-${{ matrix.device }}
+          path: ${{ github.workspace }}/ak3_out/*.zip
