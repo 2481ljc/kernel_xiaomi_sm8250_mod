@@ -154,16 +154,16 @@ jobs:
       - name: Download toolchain
         if: steps.cache-toolchain.outputs.cache-hit != 'true'
         run: |
-          mkdir -p "$TOOLCHAIN_DIR/clang" "$TOOLCHAIN_DIR/gcc/gcc64" "$TOOLCHAIN_DIR/gcc/gcc32"
-          cd "$TOOLCHAIN_DIR/clang"
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-r416183b.tar.gz -O clang.tar.gz
-          tar -xzf clang.tar.gz && rm clang.tar.gz
-          cd "$TOOLCHAIN_DIR/gcc/gcc64"
-          git init && git remote add origin https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git
-          git fetch --depth 1 origin && git checkout FETCH_HEAD
-          cd "$TOOLCHAIN_DIR/gcc/gcc32"
-          git init && git remote add origin https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git
-          git fetch --depth 1 origin && git checkout FETCH_HEAD
+          mkdir -p "$TOOLCHAIN_DIR" "$TOOLCHAIN_DIR/gcc"
+          
+          # 使用 GitHub 镜像源下载 Clang 避免谷歌源超时
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_clang_host_linux-x86_clang-r416183b.git "$TOOLCHAIN_DIR/clang"
+          
+          # 下载 GCC 64
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git "$TOOLCHAIN_DIR/gcc/gcc64"
+          
+          # 下载 GCC 32
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git "$TOOLCHAIN_DIR/gcc/gcc32"
 
       - name: Configure KernelSU
         run: |
